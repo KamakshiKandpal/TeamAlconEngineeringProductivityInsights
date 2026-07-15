@@ -1,9 +1,11 @@
 /**
  * server.js
  * Reference implementation of the Metrics/Query API described in ARCHITECTURE.md.
- * Uses in-memory mock GitLab data (see services/mockGitlab.js) instead of Postgres so this runs
- * standalone with `npm install && npm start`. Swap `db.js` calls for real Postgres queries against
- * the schema in db/schema.sql to go to production — the route handlers stay the same shape.
+ * At boot, loads real data from GitHub (see services/liveData.js) when GITHUB_TOKEN is set;
+ * otherwise — or if the live load fails — falls back to the in-memory mock generator
+ * (services/mockGitlab.js) so the dashboard always runs standalone with `npm install && npm start`.
+ * Swap `db.js` calls for real Postgres queries against the schema in db/schema.sql for a
+ * durable/production data layer — the route handlers stay the same shape either way.
  */
 require('dotenv').config();
 
@@ -12,7 +14,8 @@ const cors = require('cors');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
-const { TEAMS, DEVELOPERS, generateMergeRequests, generateDeployments } = require('./services/mockGitlab');
+const mockGitlab = require('./services/mockGitlab');
+const { loadGithubData } = require('./services/liveData');
 const { turnaroundSeconds, churnRatio, mean, median, deploymentsPerWeek } = require('./services/metrics');
 const { detectSlowPRs, detectHighChurn, detectDeploymentDrops } = require('./services/anomalies');
 const { buildInsightSummary } = require('./services/insights');
@@ -25,16 +28,77 @@ app.use(express.json());
 const RANGE_DAYS = 90;
 const now = new Date();
 const rangeStart = new Date(now.getTime() - RANGE_DAYS * 86400000);
+const GITHUB_SYNC_INTERVAL_MINUTES = Number(process.env.GITHUB_SYNC_INTERVAL_MINUTES || 10);
 
-const ALL_MRS = generateMergeRequests({ fromDate: rangeStart, toDate: now });
-const ALL_DEPLOYS = generateDeployments({ fromDate: rangeStart, toDate: now });
+let TEAMS, DEVELOPERS, ALL_MRS, ALL_DEPLOYS, MRS;
+let dataSource = null; // 'github-live' | 'mock-data', set by bootstrap()
 
 function withTeamId(mr) {
   const label = mr.labels[0];
   const team = TEAMS.find(t => t.label === label);
   return { ...mr, team_id: team?.id };
 }
-const MRS = ALL_MRS.map(withTeamId);
+
+function loadMockData() {
+  TEAMS = mockGitlab.TEAMS;
+  DEVELOPERS = mockGitlab.DEVELOPERS;
+  ALL_MRS = mockGitlab.generateMergeRequests({ fromDate: rangeStart, toDate: now });
+  ALL_DEPLOYS = mockGitlab.generateDeployments({ fromDate: rangeStart, toDate: now });
+  MRS = ALL_MRS.map(withTeamId);
+}
+
+function getConfiguredRepos() {
+  return (process.env.GITHUB_REPOS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** Loads live GitHub data into the module-level arrays; throws on total failure. */
+async function loadLiveData() {
+  const repos = getConfiguredRepos();
+  const live = await loadGithubData({ repos, fromDate: rangeStart, toDate: now });
+  TEAMS = live.TEAMS;
+  DEVELOPERS = live.DEVELOPERS;
+  ALL_MRS = live.MRS;
+  ALL_DEPLOYS = live.ALL_DEPLOYS;
+  MRS = ALL_MRS.map(withTeamId);
+}
+
+/** Boot sequence: try live GitHub data first, fall back to mock on any failure. */
+async function bootstrap() {
+  if (process.env.GITHUB_TOKEN) {
+    try {
+      await loadLiveData();
+      dataSource = 'github-live';
+      console.log(
+        `[server] loaded live GitHub data: ${ALL_MRS.length} merged PRs, ${ALL_DEPLOYS.length} deployments ` +
+        `across ${getConfiguredRepos().length} repo(s)`
+      );
+    } catch (err) {
+      console.error('[server] GitHub live data load failed, falling back to mock data:', err.message);
+    }
+  }
+  if (!dataSource) {
+    loadMockData();
+    dataSource = 'mock-data';
+    console.log('[server] GITHUB_TOKEN not set (or live load failed) — using mock data.');
+  }
+}
+
+/** Periodic refresh while running live — keeps the dashboard current without a restart. */
+function scheduleLiveRefresh() {
+  if (dataSource !== 'github-live') return;
+  setInterval(async () => {
+    try {
+      await loadLiveData();
+      console.log(`[server] refreshed live GitHub data: ${ALL_MRS.length} merged PRs, ${ALL_DEPLOYS.length} deployments`);
+    } catch (err) {
+      // Keep serving the last good snapshot rather than flipping to mock mid-run.
+      console.error('[server] live data refresh failed, keeping previous snapshot:', err.message);
+    }
+  }, GITHUB_SYNC_INTERVAL_MINUTES * 60000);
+}
 
 // ---- Filtering helper shared by every endpoint ----
 function applyFilters(rows, { team, developer, from, to }, dateField = 'created_at') {
@@ -66,7 +130,8 @@ app.get('/api/v1/filters/teams', (req, res) => {
 app.get('/api/v1/health', async (req, res) => {
   res.json({
     ok: true,
-    source: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY ? 'anthropic-configured' : 'mock-data',
+    dataSource,
+    insightsSource: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY ? 'anthropic-configured' : 'mock-data',
     timestamp: new Date().toISOString(),
   });
 });
@@ -278,6 +343,15 @@ setInterval(() => {
 }, 45000);
 
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log(`Engineering dashboard API listening on :${PORT}`));
+
+bootstrap()
+  .then(() => {
+    scheduleLiveRefresh();
+    server.listen(PORT, () => console.log(`Engineering dashboard API listening on :${PORT} (data source: ${dataSource})`));
+  })
+  .catch((err) => {
+    console.error('[server] fatal error during bootstrap:', err);
+    process.exit(1);
+  });
 
 module.exports = app;
