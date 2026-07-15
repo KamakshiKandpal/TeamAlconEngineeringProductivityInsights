@@ -523,7 +523,7 @@ export default function EngProductivityDashboard() {
         <div>
           <div style={{ color: COLORS.text, fontSize: 20, fontWeight: 700 }}>Engineering Productivity</div>
           <div style={{ color: COLORS.muted, fontSize: 12, marginTop: 2 }}>
-            GitLab-backed metrics · live filters · {kpis.sample.toLocaleString()} PRs in scope
+            Live GitHub-backed metrics · live filters · {kpis.sample.toLocaleString()} PRs in scope
           </div>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>

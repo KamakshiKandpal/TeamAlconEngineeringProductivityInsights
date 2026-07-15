@@ -11,10 +11,8 @@ backend/node_modules/
 backend/.env
 frontend/.env
 
-# Secrets / API keys
-CLAUDE_API_KEY
-ANTHROPIC_API_KEY
-"sk-ant-api03-Zvgd_SczTBqTjM0zeqSb9E79bwJ98_1xZ9V-hcXn8c3-6QNsxe26HCvRKNHDCcl7rrsz2bXDuJTT6Pzmn9WfGA--PVp6AAA"
+# Secrets / API keys — keep the real key in backend/.env (gitignored above),
+# never inline it here. This file is committed, so any secret written here leaks.
 *.pem
 
 # Build output
