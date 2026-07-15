@@ -5,6 +5,8 @@
  * standalone with `npm install && npm start`. Swap `db.js` calls for real Postgres queries against
  * the schema in db/schema.sql to go to production — the route handlers stay the same shape.
  */
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -13,6 +15,7 @@ const { WebSocketServer } = require('ws');
 const { TEAMS, DEVELOPERS, generateMergeRequests, generateDeployments } = require('./services/mockGitlab');
 const { turnaroundSeconds, churnRatio, mean, median, deploymentsPerWeek } = require('./services/metrics');
 const { detectSlowPRs, detectHighChurn, detectDeploymentDrops } = require('./services/anomalies');
+const { buildInsightSummary } = require('./services/insights');
 
 const app = express();
 app.use(cors());
@@ -58,6 +61,14 @@ function dayBucket(date) { return new Date(date).toISOString().slice(0, 10); }
 // ---------------------------------------------------------------------------
 app.get('/api/v1/filters/teams', (req, res) => {
   res.json(TEAMS.map(({ id, name }) => ({ id, name })));
+});
+
+app.get('/api/v1/health', async (req, res) => {
+  res.json({
+    ok: true,
+    source: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY ? 'anthropic-configured' : 'mock-data',
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // GET /api/v1/filters/developers?team=
@@ -192,6 +203,56 @@ app.get('/api/v1/anomalies', (req, res) => {
   }
 
   res.json(results.map((a, i) => ({ id: i + 1, detected_at: new Date().toISOString(), acknowledged: false, ...a })));
+});
+
+app.get('/api/v1/insights', async (req, res) => {
+  try {
+    const mrs = applyFilters(MRS.filter(m => m.state === 'merged'), req.query, 'merged_at');
+    const deploys = applyFilters(ALL_DEPLOYS, req.query);
+    const turnaroundsHrs = mrs.map(m => turnaroundSeconds(m) / 3600);
+    const churnRatios = mrs.map(m => churnRatio(m._stats));
+
+    const from = req.query.from ? new Date(req.query.from) : rangeStart;
+    const to = req.query.to ? new Date(req.query.to) : now;
+    const weeks = Math.max(1, (to - from) / (7 * 86400000));
+
+    const payload = {
+      kpis: {
+        pr_turnaround: {
+          avg_hours: Number(mean(turnaroundsHrs)?.toFixed(1) ?? 0),
+          median_hours: Number(median(turnaroundsHrs)?.toFixed(1) ?? 0),
+          sample_size: mrs.length,
+        },
+        code_churn: {
+          avg_ratio: Number(mean(churnRatios)?.toFixed(3) ?? 0),
+          sample_size: mrs.length,
+        },
+        deployment_frequency: {
+          per_week: Number(deploymentsPerWeek(deploys, weeks).toFixed(1)),
+          total: deploys.filter(d => d.status === 'success').length,
+        },
+      },
+      anomalies: [],
+    };
+
+    const anomalies = [];
+    anomalies.push(...detectSlowPRs(mrs, { teamId: req.query.team || null }));
+    anomalies.push(...detectHighChurn(mrs, { teamId: req.query.team || null, groupBy: 'developer' }));
+    const weekly = {};
+    for (const d of deploys) {
+      const wk = weekBucket(d.created_at);
+      weekly[wk] = (weekly[wk] || 0) + 1;
+    }
+    const weeklyArr = Object.entries(weekly).sort(([a], [b]) => a.localeCompare(b)).map(([week, count]) => ({ week, count }));
+    anomalies.push(...detectDeploymentDrops(weeklyArr, { teamId: req.query.team || null }));
+    payload.anomalies = anomalies;
+
+    const insight = await buildInsightSummary(payload, { apiKey: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY });
+    res.json(insight);
+  } catch (error) {
+    console.error('[insights] failed', error);
+    res.status(500).json({ summary: 'Unable to produce insight summary right now.', source: 'fallback', generatedAt: new Date().toISOString() });
+  }
 });
 
 // ---------------------------------------------------------------------------

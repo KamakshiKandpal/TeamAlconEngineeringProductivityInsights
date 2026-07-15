@@ -2,12 +2,20 @@
 node_modules/
 frontend/node_modules/
 backend/node_modules/
+**/node_modules/
 
 # Environment files
 .env
 .env.local
+.env.*
 backend/.env
 frontend/.env
+
+# Secrets / API keys
+CLAUDE_API_KEY
+ANTHROPIC_API_KEY
+"sk-ant-api03-Zvgd_SczTBqTjM0zeqSb9E79bwJ98_1xZ9V-hcXn8c3-6QNsxe26HCvRKNHDCcl7rrsz2bXDuJTT6Pzmn9WfGA--PVp6AAA"
+*.pem
 
 # Build output
 frontend/dist/
