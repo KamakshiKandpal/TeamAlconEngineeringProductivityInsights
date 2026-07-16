@@ -335,6 +335,7 @@ function AnomalyIcon({ type }) {
   return <TrendingDown style={{ ...style, color: COLORS.accentRed }} />;
 }
 
+
 function KPICard({ icon, label, value, unit, sub, accent }) {
   return (
     <div style={{
