@@ -3,7 +3,6 @@ node_modules/
 **/node_modules/
 
 # Environment files / secrets — never commit the real Claude/Anthropic API key
-.env
 .env.local
 .env.*
 !.env.example
